@@ -192,7 +192,7 @@ class Pi0(_model.BaseModel):
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
-        batch_shape = actions.shape[:-2]
+        batch_shape = actions.shape[:-2]        # actions.shape=[256, 50, 32]=[bs, pi0.action_horizon, pi0.action_dim]
         noise = jax.random.normal(noise_rng, actions.shape)
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
         time_expanded = time[..., None, None]

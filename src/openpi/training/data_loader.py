@@ -10,6 +10,7 @@ import jax.numpy as jnp
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
+import random
 
 import openpi.models.model as _model
 import openpi.training.config as _config
@@ -56,7 +57,12 @@ class TransformedDataset(Dataset[T_co]):
         self._transform = _transforms.compose(transforms)
 
     def __getitem__(self, index: SupportsIndex) -> T_co:
-        return self._transform(self._dataset[index])
+        try:
+            return self._transform(self._dataset[index])
+        except Exception as e:
+            print(f"[WARN] 读取失败：{e} index={index}")
+            rand_index = random.randint(0, len(self._dataset) - 1)
+            return self.__getitem__(rand_index)
 
     def __len__(self) -> int:
         return len(self._dataset)
