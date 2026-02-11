@@ -1,6 +1,6 @@
 import dataclasses
 
-import einops
+import einops, math
 import numpy as np
 
 from openpi import transforms
@@ -82,6 +82,69 @@ class LiberoInputs(transforms.DataTransformFn):
 
         return inputs
 
+def _quat2axisangle(quat):
+    """
+    Copied from robosuite: https://github.com/ARISE-Initiative/robosuite/blob/eafb81f54ffc104f905ee48a16bb15f059176ad3/robosuite/utils/transform_utils.py#L490C1-L512C55
+    """
+    # clip quaternion
+    if quat[3] > 1.0:
+        quat[3] = 1.0
+    elif quat[3] < -1.0:
+        quat[3] = -1.0
+
+    den = np.sqrt(1.0 - quat[3] * quat[3])
+    if math.isclose(den, 0.0):
+        # This is (close to) a zero degree rotation, immediately return
+        return np.zeros(3)
+
+    return (quat[:3] * 2.0 * math.acos(quat[3])) / den
+
+@dataclasses.dataclass(frozen=True)
+class LiberoInputs_rc(transforms.DataTransformFn):
+    model_type: _model.ModelType
+
+    def __call__(self, data: dict) -> dict:
+        base_image = _parse_image(data["cam_high"])
+        left_wrist_image = _parse_image(data["cam_left_wrist"])
+        right_wrist_image = _parse_image(data["cam_right_wrist"])
+        
+        # indices = np.r_[
+        #     0:10,   # Base Pos (3) + Base Rot (4) + EEF Pos (3)
+        #     13:17,  # EEF Rot (4)
+        #     21:23,  # Gripper (2)
+        #     25:32   # Joint Pos (7)
+        # ]
+
+        # indices = np.r_[21:23, 25:32]
+        
+        pos = data["state"][7:10]     # (3,)
+        quat = _quat2axisangle(data["state"][13:17])   # (3,)
+        gripper = data["state"][21:23]   # (2,)
+
+        # Create inputs dict. Do not change the keys in the dict below.
+        inputs = {
+            "state": np.concatenate([pos, quat, gripper], axis=-1),
+            # "state": data["state"][indices],
+            "image": {
+                "base_0_rgb": base_image,
+                "left_wrist_0_rgb": left_wrist_image,
+                "right_wrist_0_rgb": right_wrist_image,
+            },
+            "image_mask": {
+                "base_0_rgb": np.True_,
+                "left_wrist_0_rgb": np.True_,
+                "right_wrist_0_rgb": np.True_,
+            },
+        }
+
+        if "actions" in data:      # data["actions"]: (50, 32)
+            inputs["actions"] = data["actions"][:, 5:12]  # Only use relevant action dimensions
+
+        if "prompt" in data:
+            inputs["prompt"] = data["prompt"]
+
+        return inputs
+
 
 @dataclasses.dataclass(frozen=True)
 class LiberoOutputs(transforms.DataTransformFn):
@@ -98,3 +161,24 @@ class LiberoOutputs(transforms.DataTransformFn):
         # For Libero, we only return the first 7 actions (since the rest is padding).
         # For your own dataset, replace `7` with the action dimension of your dataset.
         return {"actions": np.asarray(data["actions"][:, :7])}
+
+
+
+@dataclasses.dataclass(frozen=True)
+class LiberoOutputs_rc(transforms.DataTransformFn):
+    """
+    This class is used to convert outputs from the model back the the dataset specific format. It is
+    used for inference only.
+
+    For your own dataset, you can copy this class and modify the action dimension based on the comments below.
+    """
+
+    def __call__(self, data: dict) -> dict:
+        # Only return the first N actions -- since we padded actions above to fit the model action
+        # dimension, we need to now parse out the correct number of actions in the return dict.
+        # For Libero, we only return the first 7 actions (since the rest is padding).
+        # For your own dataset, replace `7` with the action dimension of your dataset.
+        actions = np.asarray(data["actions"][:, :7])
+        dump_head = np.zeros((actions.shape[0], 5))  # Pad with zeros for the first 5 action dimensions
+        actions = np.concatenate([dump_head, actions], axis=1)
+        return {"actions": actions}

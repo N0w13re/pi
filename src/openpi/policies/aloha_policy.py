@@ -88,6 +88,78 @@ class AlohaInputs(transforms.DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class AlohaInputs_robocasa(transforms.DataTransformFn):
+    """Inputs for the Aloha policy.
+
+    Expected inputs:
+    - images: dict[name, img] where img is [channel, height, width]. name must be in EXPECTED_CAMERAS.
+    - state: [14]
+    - actions: [action_horizon, 14]
+    """
+
+    # If true, this will convert the joint and gripper values from the standard Aloha space to
+    # the space used by the pi internal runtime which was used to train the base model.
+    adapt_to_pi: bool = True
+
+    # The expected cameras names. All input cameras must be in this set. Missing cameras will be
+    # replaced with black images and the corresponding `image_mask` will be set to False.
+    EXPECTED_CAMERAS: ClassVar[tuple[str, ...]] = ("cam_high", "cam_low", "cam_left_wrist", "cam_right_wrist")
+
+    def __call__(self, data: dict) -> dict:
+        data = _decode_aloha(data, adapt_to_pi=self.adapt_to_pi)
+
+        in_images = data["images"]
+        if set(in_images) - set(self.EXPECTED_CAMERAS):
+            raise ValueError(f"Expected images to contain {self.EXPECTED_CAMERAS}, got {tuple(in_images)}")
+
+        # Assume that base image always exists.
+        base_image = in_images["cam_high"]
+
+        images = {
+            "base_0_rgb": base_image,
+        }
+        image_masks = {
+            "base_0_rgb": np.True_,
+        }
+
+        # Add the extra images.
+        extra_image_names = {
+            "left_wrist_0_rgb": "cam_left_wrist",
+            "right_wrist_0_rgb": "cam_right_wrist",
+        }
+        for dest, source in extra_image_names.items():
+            if source in in_images:
+                images[dest] = in_images[source]
+                image_masks[dest] = np.True_
+            else:
+                images[dest] = np.zeros_like(base_image)
+                image_masks[dest] = np.False_
+
+        indices = np.r_[
+            0:10,   # Base Pos (3) + Base Rot (4) + EEF Pos (3)
+            13:17,  # EEF Rot (4)
+            21:23,  # Gripper (2)
+            25:32   # Joint Pos (7)
+        ]
+
+        inputs = {
+            "image": images,
+            "image_mask": image_masks,
+            "state": data["state"][indices],
+        }
+
+        # Actions are only available during training.
+        if "actions" in data:
+            actions = np.asarray(data["actions"])
+            actions = _encode_actions_inv(actions, adapt_to_pi=self.adapt_to_pi)
+            inputs["actions"] = actions
+
+        if "prompt" in data:
+            inputs["prompt"] = data["prompt"]
+
+        return inputs
+
+@dataclasses.dataclass(frozen=True)
 class AlohaOutputs(transforms.DataTransformFn):
     """Outputs for the Aloha policy."""
 

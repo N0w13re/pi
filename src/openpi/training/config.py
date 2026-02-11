@@ -278,6 +278,58 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotAlohaDataConfig_robocasa(DataConfigFactory):
+    # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
+    # Gripper dimensions will remain in absolute values.
+    use_delta_joint_actions: bool = True
+    # If provided, will be injected into the input data if the "prompt" key is not present.
+    default_prompt: str | None = None
+    # If true, this will convert the joint and gripper values from the standard Aloha space to
+    # the space used by the pi internal runtime which was used to train the base model. People who
+    # use standard Aloha data should set this to true.
+    adapt_to_pi: bool = True
+
+    # Repack transforms.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {"cam_high": "observation.images.top"},
+                        "state": "observation.state",
+                        "actions": "action",
+                    }
+                )
+            ]
+        )
+    )
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[aloha_policy.AlohaInputs_robocasa(adapt_to_pi=self.adapt_to_pi)],
+            outputs=[aloha_policy.AlohaOutputs(adapt_to_pi=self.adapt_to_pi)],
+        )
+        if self.use_delta_joint_actions:
+            delta_action_mask = _transforms.make_bool_mask(6, -1, 6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+@dataclasses.dataclass(frozen=True)
 class LeRobotLiberoDataConfig(DataConfigFactory):
     """
     This config is used to configure transforms that are applied at various parts of the data pipeline.
@@ -351,6 +403,52 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+        )
+
+
+
+@dataclasses.dataclass(frozen=True)
+class LeRobotLiberoDataConfig_rc(DataConfigFactory):
+    extra_delta_transform: bool = False
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "cam_high": "observation.images.wrist_view",
+                        "cam_left_wrist": "observation.images.left_view",
+                        "cam_right_wrist": "observation.images.right_view",
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )        
+
+        data_transforms = _transforms.Group(
+            inputs=[libero_policy.LiberoInputs_rc(model_type=model_config.model_type)],
+            outputs=[libero_policy.LiberoOutputs_rc()],
+        )
+
+        if self.extra_delta_transform:
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
         )
 
 
@@ -897,6 +995,85 @@ _CONFIGS = [
         num_train_steps=30000,
     ),
 
+
+    # TrainConfig(
+    #     name="pi0_base_robocasa_lora",
+    #     model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", action_horizon=30),
+    #     data=LeRobotAlohaDataConfig_robocasa(
+    #         repo_id="GR00T-Dateset/single_panda_gripper",  # your datasets repo_id
+    #         adapt_to_pi=False,
+    #         use_delta_joint_actions=False,
+    #         repack_transforms=_transforms.Group(inputs=[
+    #             _transforms.RepackTransform({
+    #                 "images": {
+    #                     "cam_high": "observation.images.wrist_view",
+    #                     "cam_left_wrist": "observation.images.left_view",
+    #                     "cam_right_wrist": "observation.images.right_view",
+    #                 },
+    #                 "state": "observation.state",
+    #                 "actions": "action",
+    #                 "prompt": "prompt",
+    #             })
+    #         ]),
+    #         base_config=DataConfig(
+    #             prompt_from_task=True,
+    #         ),
+    #     ),
+    #     freeze_filter=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora",
+    #                                 action_expert_variant="gemma_300m_lora").get_freeze_filter(),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+    #     num_train_steps=101,
+    #     batch_size=32
+    # ),
+    
+    TrainConfig(
+        name="pi0_rc_lora",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotLiberoDataConfig_rc(
+            repo_id="GR00T-Dateset/single_panda_gripper",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30000,
+        batch_size=128,
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    
+    ### mix finetune libero, robotwin and robocasa
+    TrainConfig(
+        name="pi0_lib-rbt-rc_lora",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+        data=LeRobotLiberoDataConfig(
+            repo_id="mix/lib-rbt-rc",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
+    TrainConfig(
+        name="pi0_lib-rbt-rc_lora_moe",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora_moe", action_expert_variant="gemma_300m_lora_moe"),
+        data=LeRobotLiberoDataConfig(
+            repo_id="mix/lib-rbt-rc",
+            base_config=DataConfig(prompt_from_task=True),
+            extra_delta_transform=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        freeze_filter=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b_lora_moe", action_expert_variant="gemma_300m_lora_moe"
+        ).get_freeze_filter(),
+        ema_decay=None,
+    ),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
