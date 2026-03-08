@@ -769,7 +769,7 @@ _CONFIGS = [
         # Here is an example of loading a pi0 model for LoRA fine-tuning.
         model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
         data=LeRobotLiberoDataConfig(
-            repo_id="physical-intelligence/libero",
+            repo_id="physical-intelligence/libero_video",
             base_config=DataConfig(prompt_from_task=True),
             extra_delta_transform=True,
         ),
@@ -996,52 +996,49 @@ _CONFIGS = [
     ),
 
 
-    # TrainConfig(
-    #     name="pi0_base_robocasa_lora",
-    #     model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", action_horizon=30),
-    #     data=LeRobotAlohaDataConfig_robocasa(
-    #         repo_id="GR00T-Dateset/single_panda_gripper",  # your datasets repo_id
-    #         adapt_to_pi=False,
-    #         use_delta_joint_actions=False,
-    #         repack_transforms=_transforms.Group(inputs=[
-    #             _transforms.RepackTransform({
-    #                 "images": {
-    #                     "cam_high": "observation.images.wrist_view",
-    #                     "cam_left_wrist": "observation.images.left_view",
-    #                     "cam_right_wrist": "observation.images.right_view",
-    #                 },
-    #                 "state": "observation.state",
-    #                 "actions": "action",
-    #                 "prompt": "prompt",
-    #             })
-    #         ]),
-    #         base_config=DataConfig(
-    #             prompt_from_task=True,
-    #         ),
-    #     ),
-    #     freeze_filter=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora",
-    #                                 action_expert_variant="gemma_300m_lora").get_freeze_filter(),
-    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
-    #     num_train_steps=101,
-    #     batch_size=32
-    # ),
-    
     TrainConfig(
-        name="pi0_rc_lora",
-        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
-        data=LeRobotLiberoDataConfig_rc(
-            repo_id="GR00T-Dateset/single_panda_gripper",
-            base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=True,
+        name="pi0_base_robocasa_lora",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", action_horizon=30),
+        data=LeRobotAlohaDataConfig_robocasa(
+            repo_id="GR00T-Dateset/single_panda_gripper",  # your datasets repo_id
+            adapt_to_pi=False,
+            use_delta_joint_actions=False,
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.wrist_view",
+                        "cam_left_wrist": "observation.images.left_view",
+                        "cam_right_wrist": "observation.images.right_view",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                })
+            ]),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
         ),
+        freeze_filter=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora",
+                                    action_expert_variant="gemma_300m_lora").get_freeze_filter(),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
-        num_train_steps=30000,
-        batch_size=128,
-        freeze_filter=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
-        ema_decay=None,
     ),
+    
+    # TrainConfig(
+    #     name="pi0_rc_lora",
+    #     model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
+    #     data=LeRobotLiberoDataConfig_rc(
+    #         repo_id="GR00T-Dateset/single_panda_gripper",
+    #         base_config=DataConfig(prompt_from_task=True),
+    #         extra_delta_transform=True,
+    #     ),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+    #     num_train_steps=30000,
+    #     freeze_filter=pi0_config.Pi0Config(
+    #         paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
+    #     ).get_freeze_filter(),
+    #     ema_decay=None,
+    # ),
     
     ### mix finetune libero, robotwin and robocasa
     TrainConfig(
