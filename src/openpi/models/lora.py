@@ -58,7 +58,7 @@ class Einsum(nn.Module):
                 self.w_b = self.param("lora_b_experts", config.init_fn, (num_experts, *shape_b))
                 # Router: 将输入的最后一个特征维度映射到专家概率
                 in_features = self.shape[config.axes[0]]
-                self.router = self.param("router", nn.initializers.normal(stddev=0.02), (in_features, num_experts))
+                self.router = self.param("lora_router", nn.initializers.normal(stddev=0.02), (in_features, num_experts))
             else:
                 self.w_a = self.param("lora_a", config.init_fn, shape_a)
                 self.w_b = self.param("lora_b", config.init_fn, shape_b)
@@ -94,6 +94,18 @@ class Einsum(nn.Module):
                 gate_eqn = f"{lhs[:-1]}E,E{out_str}->{out_str}"
                 
                 lora = jnp.einsum(gate_eqn, gate_weights, lora_out)
+                
+                # 寻找那些在 lhs 中存在，但在 out_str 中消失的额外维度（例如 BTNH -> BTD 里的 N）
+                extra_chars = [c for c in lhs[:-1] if c not in out_str]
+                scale_factor = 1.0
+                if extra_chars:
+                    for c in extra_chars:
+                        dim_idx = lhs.index(c)
+                        scale_factor *= x.shape[dim_idx]
+                    
+                    # 将错误累加的倍数除回来，把 Sum 还原为 Mean
+                    lora = lora / scale_factor
+                
                 result = result + lora * config.scaling_value
             
             else:
@@ -145,68 +157,73 @@ class FeedForward(nn.Module):
         )
         self.w_gating_lora = None
         self.w_linear_lora = None
-        if self.lora_config:
-            # Setup LoRA parameters.
-            # TODO: follow up with a simplified init_fn api.
-            self.w_gating_lora = (
-                self.param("gating_einsum_lora_a", self.lora_config.init_fn, (2, self.features, self.lora_config.rank)),
-                self.param(
-                    "gating_einsum_lora_b", self.lora_config.init_fn, (2, self.lora_config.rank, self.hidden_dim)
-                ),
-            )
-            self.w_linear_lora = (
-                self.param("linear_lora_a", self.lora_config.init_fn, (self.hidden_dim, self.lora_config.rank)),
-                self.param("linear_lora_b", self.lora_config.init_fn, (self.lora_config.rank, self.features)),
-            )
+        if config := self.lora_config:
+            num_experts = getattr(config, 'num_experts', 1)
+            if num_experts > 1:
+                self.w_gating_lora = (
+                    self.param("gating_einsum_lora_a_experts", config.init_fn, (num_experts, 2, self.features, config.rank)),
+                    self.param("gating_einsum_lora_b_experts", config.init_fn, (num_experts, 2, config.rank, self.hidden_dim)),
+                )
+                self.w_linear_lora = (
+                    self.param("linear_lora_a_experts", config.init_fn, (num_experts, self.hidden_dim, config.rank)),
+                    self.param("linear_lora_b_experts", config.init_fn, (num_experts, config.rank, self.features)),
+                )
+                # 初始化 Router，基于模块初始输入的特征维度 self.features
+                self.lora_router = self.param("lora_router", nn.initializers.normal(stddev=0.02), (self.features, num_experts))
+            else:
+                self.w_gating_lora = (
+                    self.param("gating_einsum_lora_a", config.init_fn, (2, self.features, config.rank)),
+                    self.param("gating_einsum_lora_b", config.init_fn, (2, config.rank, self.hidden_dim)),
+                )
+                self.w_linear_lora = (
+                    self.param("linear_lora_a", config.init_fn, (self.hidden_dim, config.rank)),
+                    self.param("linear_lora_b", config.init_fn, (config.rank, self.features)),
+                )
 
     @nn.compact
     def __call__(self, x):
-        dtype = x.dtype  # original dtype, could be half-precision
-        ff_gate = self._dot(
-            x,
-            self.w_gating[0],
-            None if self.w_gating_lora is None else (self.w_gating_lora[0][0], self.w_gating_lora[1][0]),
-        )
+        dtype = x.dtype
+        gate_weights = None
+        num_experts = getattr(self.lora_config, 'num_experts', 1) if self.lora_config else 1
+        
+        if num_experts > 1:
+            # 在模块入口处，根据初始 x 计算唯一的路由权重
+            router_logits = jnp.dot(x, self.lora_router.astype(dtype))
+            gate_weights = jax.nn.softmax(router_logits, axis=-1)
+
+        # 传递切片后的专家权重给 _dot
+        gating_a = None if self.w_gating_lora is None else (self.w_gating_lora[0][:, 0] if num_experts > 1 else self.w_gating_lora[0][0])
+        gating_b = None if self.w_gating_lora is None else (self.w_gating_lora[1][:, 0] if num_experts > 1 else self.w_gating_lora[1][0])
+        ff_gate = self._dot(x, self.w_gating[0], None if self.w_gating_lora is None else (gating_a, gating_b), gate_weights)
         gate_value = nn.gelu(ff_gate)
 
-        ff1 = self._dot(
-            x,
-            self.w_gating[1],
-            None if self.w_gating_lora is None else (self.w_gating_lora[0][1], self.w_gating_lora[1][1]),
-        )
+        ff1_a = None if self.w_gating_lora is None else (self.w_gating_lora[0][:, 1] if num_experts > 1 else self.w_gating_lora[0][1])
+        ff1_b = None if self.w_gating_lora is None else (self.w_gating_lora[1][:, 1] if num_experts > 1 else self.w_gating_lora[1][1])
+        ff1 = self._dot(x, self.w_gating[1], None if self.w_gating_lora is None else (ff1_a, ff1_b), gate_weights)
         activations = gate_value * ff1
 
-        outputs = self._dot(activations, self.w_linear, self.w_linear_lora)
+        outputs = self._dot(activations, self.w_linear, self.w_linear_lora, gate_weights)
         assert outputs.dtype == dtype
         return outputs
 
-    def _dot(self, x: at.Array, w: at.Array, lora_weights: tuple[at.Array, at.Array] | None) -> at.Array:
+    def _dot(self, x: at.Array, w: at.Array, lora_weights: tuple[at.Array, at.Array] | None, gate_weights: at.Array | None = None) -> at.Array:
         base = jnp.dot(x, w.astype(x.dtype))
         if lora_weights is None:
             return base
-        
-        if self.lora_config.num_experts > 1:
+            
+        num_experts = getattr(self.lora_config, 'num_experts', 1) if self.lora_config else 1
+        if num_experts > 1 and gate_weights is not None:
             w_a_experts, w_b_experts = lora_weights
             
-            # 计算软路由概率
-            router_logits = jnp.dot(x, self.router.astype(x.dtype))
-            gate_weights = jax.nn.softmax(router_logits, axis=-1) # 形状: [..., E]
-            
-            # vmap 计算所有专家的输出
             def compute_expert(wa, wb):
                 return jnp.dot(jnp.dot(x, wa.astype(x.dtype)), wb.astype(x.dtype))
                 
-            lora_out = jax.vmap(compute_expert)(w_a_experts, w_b_experts) # 形状: [E, ..., out_dim]
+            lora_out = jax.vmap(compute_expert)(w_a_experts, w_b_experts) 
             
-            # 优雅的加权求和机制：
-            # 将 lora_out 的专家维度(E)移动到倒数第二个位置: [..., E, out_dim]
             lora_out_transposed = jnp.moveaxis(lora_out, 0, -2)
-            # 扩展 gate_weights 以便进行广播乘法: [..., E, 1]
             gate_expanded = jnp.expand_dims(gate_weights, axis=-1)
-            
-            # 逐元素相乘后沿专家维度(axis=-2)求和
             lora_blended = jnp.sum(lora_out_transposed * gate_expanded, axis=-2)
+            
             return base + lora_blended
-        
         else:
             return base + jnp.dot(jnp.dot(x, lora_weights[0].astype(x.dtype)), lora_weights[1].astype(x.dtype))
