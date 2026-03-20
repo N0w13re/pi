@@ -3,6 +3,7 @@ import re
 
 import flax.linen as nn
 import flax.struct as struct
+import jax
 import jax.numpy as jnp
 
 import openpi.shared.array_typing as at
@@ -24,6 +25,8 @@ class LoRAConfig:
     axes: tuple[int, int] = (-2, -1)
     # Axis label which is used by LoRA in einsum equations. Must not be present in the original equation.
     label: str = "L"
+    # MoE
+    num_experts: int = 1
 
     @property
     def scaling_value(self) -> float:
@@ -48,8 +51,17 @@ class Einsum(nn.Module):
             shape_a, shape_b = list(self.shape), list(self.shape)
             shape_a[config.axes[1]] = config.rank
             shape_b[config.axes[0]] = config.rank
-            self.w_a = self.param("lora_a", config.init_fn, shape_a)
-            self.w_b = self.param("lora_b", config.init_fn, shape_b)
+            
+            if config.num_experts > 1:
+                num_experts = config.num_experts
+                self.w_a = self.param("lora_a_experts", config.init_fn, (num_experts, *shape_a))
+                self.w_b = self.param("lora_b_experts", config.init_fn, (num_experts, *shape_b))
+                # Router: 将输入的最后一个特征维度映射到专家概率
+                in_features = self.shape[config.axes[0]]
+                self.router = self.param("router", nn.initializers.normal(stddev=0.02), (in_features, num_experts))
+            else:
+                self.w_a = self.param("lora_a", config.init_fn, shape_a)
+                self.w_b = self.param("lora_b", config.init_fn, shape_b)
 
     @nn.compact
     def __call__(self, eqn: str, x):
@@ -58,9 +70,36 @@ class Einsum(nn.Module):
 
         if config := self.lora_config:
             eqn_a, eqn_b = self._make_lora_eqns(eqn)
-            lora = jnp.einsum(eqn_a, x, self.w_a.astype(dtype))
-            lora = jnp.einsum(eqn_b, lora, self.w_b.astype(dtype))
-            result = result + lora * config.scaling_value
+            
+            if config.num_experts > 1:
+                # 1. 计算 Router 权重 (Token-level Soft Routing)
+                router_logits = jnp.dot(x, self.router.astype(dtype))
+                gate_weights = jax.nn.softmax(router_logits, axis=-1)
+                
+                # 2. 纯函数定义：单个专家如何计算 LoRA
+                def compute_expert(wa, wb):
+                    lora_a_out = jnp.einsum(eqn_a, x, wa.astype(dtype))
+                    return jnp.einsum(eqn_b, lora_a_out, wb.astype(dtype))
+                
+                # 3. jax.vmap 自动处理多专家并行计算
+                # 输出 lora_out 的形状变为: [E, *out_shape]
+                lora_out = jax.vmap(compute_expert)(self.w_a, self.w_b)
+                
+                # 4. 动态 Einsum 混合门控权重
+                # 提取输入的轴标签 (如 "BSD") 和输出的轴标签 (如 "3BSKH")
+                lhs = eqn.split(',')[0]
+                out_str = eqn.split('->')[1]
+                
+                # 自动构建路由 Einsum，例如: "BSE,E3BSKH->3BSKH"
+                gate_eqn = f"{lhs[:-1]}E,E{out_str}->{out_str}"
+                
+                lora = jnp.einsum(gate_eqn, gate_weights, lora_out)
+                result = result + lora * config.scaling_value
+            
+            else:
+                lora = jnp.einsum(eqn_a, x, self.w_a.astype(dtype))
+                lora = jnp.einsum(eqn_b, lora, self.w_b.astype(dtype))
+                result = result + lora * config.scaling_value
 
         return result
 
@@ -145,4 +184,29 @@ class FeedForward(nn.Module):
         base = jnp.dot(x, w.astype(x.dtype))
         if lora_weights is None:
             return base
-        return base + jnp.dot(jnp.dot(x, lora_weights[0].astype(x.dtype)), lora_weights[1].astype(x.dtype))
+        
+        if self.lora_config.num_experts > 1:
+            w_a_experts, w_b_experts = lora_weights
+            
+            # 计算软路由概率
+            router_logits = jnp.dot(x, self.router.astype(x.dtype))
+            gate_weights = jax.nn.softmax(router_logits, axis=-1) # 形状: [..., E]
+            
+            # vmap 计算所有专家的输出
+            def compute_expert(wa, wb):
+                return jnp.dot(jnp.dot(x, wa.astype(x.dtype)), wb.astype(x.dtype))
+                
+            lora_out = jax.vmap(compute_expert)(w_a_experts, w_b_experts) # 形状: [E, ..., out_dim]
+            
+            # 优雅的加权求和机制：
+            # 将 lora_out 的专家维度(E)移动到倒数第二个位置: [..., E, out_dim]
+            lora_out_transposed = jnp.moveaxis(lora_out, 0, -2)
+            # 扩展 gate_weights 以便进行广播乘法: [..., E, 1]
+            gate_expanded = jnp.expand_dims(gate_weights, axis=-1)
+            
+            # 逐元素相乘后沿专家维度(axis=-2)求和
+            lora_blended = jnp.sum(lora_out_transposed * gate_expanded, axis=-2)
+            return base + lora_blended
+        
+        else:
+            return base + jnp.dot(jnp.dot(x, lora_weights[0].astype(x.dtype)), lora_weights[1].astype(x.dtype))

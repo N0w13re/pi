@@ -52,7 +52,7 @@ class Config:
     lora_configs: dict[str, lora.LoRAConfig] = dataclasses.field(default_factory=dict)
 
 
-Variant = Literal["dummy", "gemma_300m", "gemma_300m_lora", "gemma_2b", "gemma_2b_lora"]
+Variant = Literal["dummy", "gemma_300m", "gemma_300m_lora", "gemma_2b", "gemma_2b_lora", "gemma_300m_lora_moe", "gemma_2b_lora_moe"]
 
 
 def get_config(variant: Variant) -> Config:
@@ -106,8 +106,28 @@ def get_config(variant: Variant) -> Config:
             head_dim=256,
             lora_configs={"attn": lora.LoRAConfig(rank=32, alpha=32.0), "ffn": lora.LoRAConfig(rank=32, alpha=32.0)},
         )
-    raise ValueError(f"Unknown variant: {variant}")
-
+    
+    # MoE
+    if variant == "gemma_2b_lora_moe":
+        return Config(
+            width=2048,
+            depth=18,
+            mlp_dim=16_384,
+            num_heads=8,
+            num_kv_heads=1,
+            head_dim=256,
+            lora_configs={"attn": lora.LoRAConfig(rank=16, alpha=16.0, num_experts=4), "ffn": lora.LoRAConfig(rank=16, alpha=16.0, num_experts=4)},
+        )
+    if variant == "gemma_300m_lora_moe":
+        return Config(
+            width=1024,
+            depth=18,
+            mlp_dim=4096,
+            num_heads=8,
+            num_kv_heads=1,
+            head_dim=256,
+            lora_configs={"attn": lora.LoRAConfig(rank=32, alpha=32.0, num_experts=4), "ffn": lora.LoRAConfig(rank=32, alpha=32.0, num_experts=4)},
+        )
 
 @at.typecheck
 class RMSNorm(nn.Module):
