@@ -1042,34 +1042,55 @@ _CONFIGS = [
     
     ### mix finetune libero, robotwin and robocasa
     TrainConfig(
-        name="pi0_lib-rbt-rc_lora",
-        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
-        data=LeRobotLiberoDataConfig(
-            repo_id="mix/lib-rbt-rc",
+        name="pi0_mix_lora",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora", action_horizon=30),
+        data=LeRobotAlohaDataConfig(
+            repo_id="mix/lib-rbt-rc",  # your datasets repo_id
+            adapt_to_pi=False,
+            use_delta_joint_actions=False,
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                })
+            ]),
             base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=True,
         ),
+        freeze_filter=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora",
+                                    action_expert_variant="gemma_300m_lora").get_freeze_filter(),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
-        num_train_steps=30_000,
-        freeze_filter=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"
-        ).get_freeze_filter(),
-        ema_decay=None,
     ),
+    
     TrainConfig(
-        name="pi0_lib-rbt-rc_lora_moe",
-        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora_moe", action_expert_variant="gemma_300m_lora_moe"),
-        data=LeRobotLiberoDataConfig(
-            repo_id="mix/lib-rbt-rc",
+        name="pi0_mix_lora_moe",
+        model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora_moe", action_expert_variant="gemma_300m_lora_moe", action_horizon=30),
+        data=LeRobotAlohaDataConfig(
+            repo_id="mix/lib-rbt-rc",  # your datasets repo_id
+            adapt_to_pi=False,
+            use_delta_joint_actions=False,
+            repack_transforms=_transforms.Group(inputs=[
+                _transforms.RepackTransform({
+                    "images": {
+                        "cam_high": "observation.images.cam_high",
+                        "cam_left_wrist": "observation.images.cam_left_wrist",
+                        "cam_right_wrist": "observation.images.cam_right_wrist",
+                    },
+                    "state": "observation.state",
+                    "actions": "action",
+                    "prompt": "prompt",
+                })
+            ]),
             base_config=DataConfig(prompt_from_task=True),
-            extra_delta_transform=True,
         ),
+        freeze_filter=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora_moe",
+                                    action_expert_variant="gemma_300m_lora_moe").get_freeze_filter(),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
-        num_train_steps=30_000,
-        freeze_filter=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b_lora_moe", action_expert_variant="gemma_300m_lora_moe"
-        ).get_freeze_filter(),
-        ema_decay=None,
     ),
 ]
 
